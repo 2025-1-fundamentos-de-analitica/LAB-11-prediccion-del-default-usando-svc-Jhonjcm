@@ -95,3 +95,168 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+# flake8: noqa: E501
+
+# flake8: noqa: E501
+
+import os
+import json
+import gzip
+import zipfile
+import pickle
+import pandas as pd
+from sklearn.pipeline import Pipeline
+from sklearn.svm import SVC
+from sklearn.decomposition import PCA
+from sklearn.model_selection import GridSearchCV
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.metrics import (
+    precision_score,
+    balanced_accuracy_score,
+    recall_score,
+    f1_score,
+    confusion_matrix,
+)
+
+
+def limpiar_dataset(df):
+    df = df.copy()
+    df = df.rename(columns={"default payment next month": "default"})
+    df.drop(columns=["ID"], inplace=True)
+    df.dropna(inplace=True)
+    df = df[(df["EDUCATION"] != 0) & (df["MARRIAGE"] != 0)]
+    df.loc[df["EDUCATION"] > 4, "EDUCATION"] = 4
+    return df
+
+
+def crear_pipeline():
+    columnas_cat = ["SEX", "EDUCATION", "MARRIAGE"]
+    columnas_num = [
+        "LIMIT_BAL", "AGE", "PAY_0", "PAY_2", "PAY_3", "PAY_4", "PAY_5", "PAY_6",
+        "BILL_AMT1", "BILL_AMT2", "BILL_AMT3", "BILL_AMT4", "BILL_AMT5", "BILL_AMT6",
+        "PAY_AMT1", "PAY_AMT2", "PAY_AMT3", "PAY_AMT4", "PAY_AMT5", "PAY_AMT6"
+    ]
+
+    transformador = ColumnTransformer(
+        transformers=[
+            ("cat", OneHotEncoder(handle_unknown="ignore"), columnas_cat),
+            ("num", StandardScaler(), columnas_num)
+        ],
+        remainder="passthrough"
+    )
+
+    pipeline = Pipeline(steps=[
+        ("transformador", transformador),
+        ("reductor", PCA()),
+        ("seleccionador", SelectKBest(score_func=f_classif)),
+        ("clasificador", SVC(kernel="rbf", random_state=42))
+    ])
+
+    return pipeline
+
+
+def ajustar_modelo_con_grid(pipeline, x_train, y_train):
+    grid = GridSearchCV(
+        estimator=pipeline,
+        param_grid={
+            "reductor__n_components": [20, 21],
+            "seleccionador__k": [12],
+            "clasificador__gamma": [0.099]
+        },
+        cv=10,
+        scoring="balanced_accuracy",
+        verbose=1
+    )
+    grid.fit(x_train, y_train)
+    return grid
+
+
+def calcular_metricas(modelo, x_train, y_train, x_test, y_test):
+    y_train_pred = modelo.predict(x_train)
+    y_test_pred = modelo.predict(x_test)
+
+    return [
+        {
+            "type": "metrics",
+            "dataset": "train",
+            "precision": precision_score(y_train, y_train_pred),
+            "balanced_accuracy": balanced_accuracy_score(y_train, y_train_pred),
+            "recall": recall_score(y_train, y_train_pred),
+            "f1_score": f1_score(y_train, y_train_pred)
+        },
+        {
+            "type": "metrics",
+            "dataset": "test",
+            "precision": precision_score(y_test, y_test_pred),
+            "balanced_accuracy": balanced_accuracy_score(y_test, y_test_pred),
+            "recall": recall_score(y_test, y_test_pred),
+            "f1_score": f1_score(y_test, y_test_pred)
+        }
+    ]
+
+
+def calcular_matrices_confusion(modelo, x_train, y_train, x_test, y_test):
+    def matriz(y_real, y_pred, dataset):
+        cm = confusion_matrix(y_real, y_pred, labels=[0, 1])
+        return {
+            "type": "cm_matrix",
+            "dataset": dataset,
+            "true_0": {
+                "predicted_0": int(cm[0, 0]),
+                "predicted_1": int(cm[0, 1])
+            },
+            "true_1": {
+                "predicted_0": int(cm[1, 0]),
+                "predicted_1": int(cm[1, 1])
+            }
+        }
+
+    return [
+        matriz(y_train, modelo.predict(x_train), "train"),
+        matriz(y_test, modelo.predict(x_test), "test")
+    ]
+
+
+def guardar_modelo(modelo, ruta="files/models/model.pkl.gz"):
+    os.makedirs(os.path.dirname(ruta), exist_ok=True)
+    with gzip.open(ruta, "wb") as f:
+        pickle.dump(modelo, f)
+
+
+def guardar_metricas(metricas, ruta="files/output/metrics.json"):
+    os.makedirs(os.path.dirname(ruta), exist_ok=True)
+    with open(ruta, "w") as f:
+        for linea in metricas:
+            f.write(json.dumps(linea) + "\n")
+
+
+def ejecutar_pipeline():
+    with zipfile.ZipFile("files/input/train_data.csv.zip", "r") as zf:
+        with zf.open(zf.namelist()[0]) as f:
+            df_train = pd.read_csv(f)
+
+    with zipfile.ZipFile("files/input/test_data.csv.zip", "r") as zf:
+        with zf.open(zf.namelist()[0]) as f:
+            df_test = pd.read_csv(f)
+
+    df_train = limpiar_dataset(df_train)
+    df_test = limpiar_dataset(df_test)
+
+    X_train, y_train = df_train.drop(columns=["default"]), df_train["default"]
+    X_test, y_test = df_test.drop(columns=["default"]), df_test["default"]
+
+    pipeline = crear_pipeline()
+    modelo_final = ajustar_modelo_con_grid(pipeline, X_train, y_train)
+    guardar_modelo(modelo_final)
+
+    metricas = calcular_metricas(modelo_final, X_train, y_train, X_test, y_test)
+    matrices = calcular_matrices_confusion(modelo_final, X_train, y_train, X_test, y_test)
+
+    guardar_metricas(metricas + matrices)
+
+
+# Ejecutar
+if __name__ == "__main__":
+    ejecutar_pipeline()
